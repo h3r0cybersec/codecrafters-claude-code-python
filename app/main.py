@@ -5,13 +5,31 @@ import sys
 from json import loads
 from subprocess import run, PIPE, STDOUT, TimeoutExpired
 import shlex
+from json import load
+from pathlib import Path
 
 from openai import OpenAI
 from rich import print
 
+
 # Costants
+BASE_DIR = Path(__file__).resolve().parent
 API_KEY = os.getenv("OPENROUTER_API_KEY")
 BASE_URL = os.getenv("OPENROUTER_BASE_URL", default="https://openrouter.ai/api/v1")
+CONF_FILE = BASE_DIR / "tools.json"
+
+def load_tools() -> list[dict[str, str]]:
+    """ loads tool's definition from provided .json file """
+    tools = []
+    if not CONF_FILE.exists():
+        print("!!tools file not exists so no tools will be loaded!")
+    else:
+        try:
+            with open(CONF_FILE, mode='r', encoding="utf-8") as fp:
+                tools = load(fp)
+        except Exception as err:
+            print(f"# cannot load llm tools due to err: {err}")
+    return tools
 
 ######################################### TOOL'S DEFINITION ###########################
 def tool_read(params: dict[str, str]) -> str|None:
@@ -41,7 +59,7 @@ def tool_bash(params: dict[str, str]) -> str|None:
     try:
         proc = run(
             shlex.split(command),
-            universal_newlines=True,
+            text=True,
             stdout=PIPE,
             stderr=STDOUT,
             timeout=0.5
@@ -62,6 +80,7 @@ def main():
     if not API_KEY:
         raise RuntimeError("OPENROUTER_API_KEY is not set")
 
+    skills = load_tools()
     client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
     messages = [{"role": "user", "content": args.p}]
 
@@ -69,63 +88,7 @@ def main():
         response = client.chat.completions.create(
             model="anthropic/claude-haiku-4.5",
             messages=messages,
-            tools=[
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "read",
-                        "description": "Read and return the contents of a file",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "file_path": {
-                                    "type": "string",
-                                    "description": "The path to the file to read",
-                                }
-                            },
-                            "required": ["file_path"],
-                        },
-                    },
-                },
-                {
-                  "type": "function",
-                  "function": {
-                    "name": "write",
-                    "description": "Write content to a file",
-                    "parameters": {
-                      "type": "object",
-                      "required": ["file_path", "content"],
-                      "properties": {
-                        "file_path": {
-                          "type": "string",
-                          "description": "The path of the file to write to"
-                        },
-                        "content": {
-                          "type": "string",
-                          "description": "The content to write to the file"
-                        }
-                      }
-                    }
-                  }
-                },
-                {
-                  "type": "function",
-                  "function": {
-                    "name": "bash",
-                    "description": "Execute a shell command",
-                    "parameters": {
-                      "type": "object",
-                      "required": ["command"],
-                      "properties": {
-                        "command": {
-                          "type": "string",
-                          "description": "The command to execute"
-                        }
-                      }
-                    }
-                  }
-                }
-            ],
+            tools=skills,
         )
 
         actor = response.choices[0].message
