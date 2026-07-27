@@ -3,6 +3,8 @@ import inspect
 import os
 import sys
 from json import loads
+from subprocess import run, PIPE, STDOUT, TimeoutExpired
+import shlex
 
 from openai import OpenAI
 from rich import print
@@ -31,11 +33,27 @@ def tool_write(params: dict[str, str]) -> str|None:
         fd.write(content)
         return f"{file} written with success"
 
+def tool_bash(params: dict[str, str]) -> str|None:
+    """ execute a system command """
+    command = params.get("command", None)
+    if not command:
+        raise RuntimeError("command not provided")
+    try:
+        proc = run(
+            shlex.split(command),
+            universal_newlines=True,
+            stdout=PIPE,
+            stderr=STDOUT,
+            timeout=0.5
+        )
+        return proc.stdout
+    except TimeoutExpired:
+        raise RuntimeError("command timeout")
+
 ######################################### END TOOL'S DEFINITION #######################
 def main():
     current_functions = inspect.getmembers(sys.modules[__name__], inspect.isfunction)
     tools = {name: func for name, func in current_functions if name.startswith("tool_")}
-    print(tools, file=sys.stderr)
 
     p = argparse.ArgumentParser()
     p.add_argument("-p", required=True)
@@ -89,6 +107,23 @@ def main():
                       }
                     }
                   }
+                },
+                {
+                  "type": "function",
+                  "function": {
+                    "name": "bash",
+                    "description": "Execute a shell command",
+                    "parameters": {
+                      "type": "object",
+                      "required": ["command"],
+                      "properties": {
+                        "command": {
+                          "type": "string",
+                          "description": "The command to execute"
+                        }
+                      }
+                    }
+                  }
                 }
             ],
         )
@@ -103,7 +138,6 @@ def main():
             # and invoke it
             for tool in actor.tool_calls:
                 if invoke := tools.get(f"tool_{tool.function.name}", None):
-                    print(tools.get(f"tool_{tool.function.name}", None),file=sys.stderr)
                     result = invoke(loads(tool.function.arguments))
                     messages.append(
                         {"role": "tool", "tool_call_id": tool.id, "content": result}
