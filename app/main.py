@@ -1,4 +1,5 @@
 import argparse
+from dataclasses import dataclass
 import inspect
 import os
 import sys
@@ -8,6 +9,7 @@ import shlex
 from json import load
 from pathlib import Path
 
+import frontmatter
 from openai import OpenAI
 from rich import print
 
@@ -16,22 +18,58 @@ from rich import print
 BASE_DIR = Path(__file__).resolve().parent
 API_KEY = os.getenv("OPENROUTER_API_KEY")
 BASE_URL = os.getenv("OPENROUTER_BASE_URL", default="https://openrouter.ai/api/v1")
-CONF_FILE = BASE_DIR / "tools.json"
+TOOLS_PATH  = BASE_DIR / "tools.json"
+SKILLS_PATH = Path(".claude/skills")
+
+# LLM Model to use
+MODEL = "anthropic/claude-haiku-4.5"
+
+@dataclass
+class Skill:
+	""" Skill data """
+	name: str
+	desc: str
+	body: str
+
+	def __str__(self) -> str:
+		return f"- {self.name}: {self.desc}"
+
 
 def load_tools() -> list[dict[str, str]]:
-    """ loads tool's definition from provided .json file """
+    """ loads tools from disk """
     tools = []
-    if not CONF_FILE.exists():
-        print("!!tools file not exists so no tools will be loaded!")
-    else:
-        try:
-            with open(CONF_FILE, mode='r', encoding="utf-8") as fp:
-                tools = load(fp)
-        except Exception as err:
-            print(f"# cannot load llm tools due to err: {err}")
+    try:
+        with open(TOOLS_PATH, mode='r', encoding="utf-8") as fp:
+            tools = load(fp)
+    except FileNotFoundError:
+        print(err)
     return tools
 
-######################################### TOOL'S DEFINITION ###########################
+
+def load_skills() -> list[Skill]:
+    """ loads skills from disk """
+    skills = []
+    try:
+        for skill_file in SKILLS_PATH.iterdir():
+            try:
+                with open(skill_file / "SKILL.md") as fd:
+                    src = frontmatter.load(fd)
+                    skills.append(
+                        Skill(
+                            src.metadata["name"],
+                            src.metadata["description"],
+                            ""
+                        )
+                    )
+            except FileNotFoundError:
+                print(f"skill not set for {skill_file.name}")
+    except FileNotFoundError:
+        #print("no skills found")
+        pass
+    return skills
+
+############################### TOOL'S DEFINITION ###################################
+
 def tool_read(params: dict[str, str]) -> str|None:
     """read the provided file from the local system"""
     file = params.get("file_path", None)
@@ -42,6 +80,7 @@ def tool_read(params: dict[str, str]) -> str|None:
     with open(file, mode="r", encoding="utf-8") as fd:
         return fd.read()
 
+
 def tool_write(params: dict[str, str]) -> str|None:
     """ write the provided file on the local system """
     file, content = params.get("file_path", None), params.get("content", None)
@@ -50,6 +89,7 @@ def tool_write(params: dict[str, str]) -> str|None:
     with open(file, mode='w', encoding='utf-8') as fd:
         fd.write(content)
         return f"{file} written with success"
+
 
 def tool_bash(params: dict[str, str]) -> str|None:
     """ execute a system command """
@@ -68,49 +108,83 @@ def tool_bash(params: dict[str, str]) -> str|None:
     except TimeoutExpired:
         raise RuntimeError("command timeout")
 
-######################################### END TOOL'S DEFINITION #######################
+############################### END TOOL'S DEFINITION ###############################
+
+TOOLS_MAP = {
+    "bash" : tool_bash,
+    "read" : tool_read,
+    "write": tool_write
+}
+
 def main():
     current_functions = inspect.getmembers(sys.modules[__name__], inspect.isfunction)
     tools = {name: func for name, func in current_functions if name.startswith("tool_")}
 
     p = argparse.ArgumentParser()
-    p.add_argument("-p", required=True)
+    p.add_argument(
+        "-p",
+        "--prompt",
+        required=True
+    )
     args = p.parse_args()
 
     if not API_KEY:
         raise RuntimeError("OPENROUTER_API_KEY is not set")
 
-    skills = load_tools()
+    tools = load_tools()
+    skills = load_skills()
     client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
-    messages = [{"role": "user", "content": args.p}]
+    messages = [
+        {
+            "role": "system",
+            "content": f"You have access to the following skills:\n\n{'\n'.join(map(str, skills))}"},
+        {
+            "role": "user",
+            "content": args.prompt
+        }
+    ]
 
-    while True:
-        response = client.chat.completions.create(
-            model="anthropic/claude-haiku-4.5",
-            messages=messages,
-            tools=skills,
-        )
+    response = None
+    try:
+        while True:
+            response = client.responses.create(
+                model=MODEL,
+                input=messages,
+                tools=tools
+            )
 
-        actor = response.choices[0].message
-        messages.append(actor)
+            messages += response.output
+            function_calls = [
+                item for item in response.output
+                if item.type == "function_call"
+            ]
 
-        #if not res.choices or len(res.choices) == 0:
-        #    raise RuntimeError("no choices in response")
-        if actor.tool_calls:
-            # if the model want to use any tool search for available tools
-            # and invoke it
-            for tool in actor.tool_calls:
-                if invoke := tools.get(f"tool_{tool.function.name}", None):
-                    result = invoke(loads(tool.function.arguments))
-                    messages.append(
-                        {"role": "tool", "tool_call_id": tool.id, "content": result}
+            # if no more functions call terminate
+            if not function_calls:
+                print(response.output_text, file=sys.stdout)
+                break
+
+            # execute tools
+            for item in function_calls:
+                tool = TOOLS_MAP.get(item.name)
+
+                if not tool:
+                    raise RuntimeError(
+                        f"Requested tool '{item.name}' not registered"
                     )
-                else:
-                    raise RuntimeError(f"Requested tool {tool.function.name} not registered")
-            continue
-        print(actor.content, file=sys.stdout)
-        break
 
+                try:
+                    result = tool(loads(item.arguments))
+                except Exception as exc:
+                    result = f"Error executing tool: {exc}"
+
+                messages.append({
+                    "type": "function_call_output",
+                    "call_id": item.call_id,
+                    "output": str(result)
+                })
+    except KeyboardInterrupt:
+        pass
 
 if __name__ == "__main__":
     main()
