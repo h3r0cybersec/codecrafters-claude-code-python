@@ -2,7 +2,7 @@
 [
   {
     "type": "function",
-    "name": "read",
+    "name": "tool_file_read",
     "description": "Read and return the contents of a file",
     "parameters": {
       "type": "object",
@@ -19,7 +19,7 @@
   },
   {
     "type": "function",
-    "name": "write",
+    "name": "tool_file_write",
     "description": "Write content to a file",
     "parameters": {
       "type": "object",
@@ -40,7 +40,7 @@
   },
   {
     "type": "function",
-    "name": "bash",
+    "name": "tool_command_execute",
     "description": "Execute a shell command",
     "parameters": {
       "type": "object",

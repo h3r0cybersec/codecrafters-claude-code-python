@@ -68,9 +68,21 @@ def load_skills() -> list[Skill]:
         pass
     return skills
 
+
+def invoke_skill(skill: str) -> str|None:
+    try:
+        full_skill_path = (SKILLS_PATH / skill / "SKILL.md").resolve()
+        #if not str(full_skill_path).startswith(str(SKILLS_PATH)):
+        #    raise ValueError("Directory traversal attempt")
+        with open(full_skill_path) as fd:
+            src = frontmatter.load(fd)
+            return src.content
+    except FileNotFoundError:
+        print(f"provided '{skill}' was not found")
+
 ############################### TOOL'S DEFINITION ###################################
 
-def tool_read(params: dict[str, str]) -> str|None:
+def tool_file_read(params: dict[str, str]) -> str|None:
     """read the provided file from the local system"""
     file = params.get("file_path", None)
 
@@ -81,7 +93,7 @@ def tool_read(params: dict[str, str]) -> str|None:
         return fd.read()
 
 
-def tool_write(params: dict[str, str]) -> str|None:
+def tool_file_write(params: dict[str, str]) -> str|None:
     """ write the provided file on the local system """
     file, content = params.get("file_path", None), params.get("content", None)
     if not file or not content:
@@ -91,7 +103,7 @@ def tool_write(params: dict[str, str]) -> str|None:
         return f"{file} written with success"
 
 
-def tool_bash(params: dict[str, str]) -> str|None:
+def tool_command_execute(params: dict[str, str]) -> str|None:
     """ execute a system command """
     command = params.get("command", None)
     if not command:
@@ -110,15 +122,19 @@ def tool_bash(params: dict[str, str]) -> str|None:
 
 ############################### END TOOL'S DEFINITION ###############################
 
-TOOLS_MAP = {
-    "bash" : tool_bash,
-    "read" : tool_read,
-    "write": tool_write
-}
-
 def main():
     current_functions = inspect.getmembers(sys.modules[__name__], inspect.isfunction)
-    tools = {name: func for name, func in current_functions if name.startswith("tool_")}
+    available_tools = {name: func for name, func in current_functions if name.startswith("tool_")}
+    
+    tools = load_tools()
+    skills = load_skills()
+    client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
+    messages = [
+        {
+            "role": "system",
+            "content": f"You have access to the following skills:\n\n{'\n'.join(map(str, skills))}"
+        },
+    ]
 
     p = argparse.ArgumentParser()
     p.add_argument(
@@ -131,18 +147,21 @@ def main():
     if not API_KEY:
         raise RuntimeError("OPENROUTER_API_KEY is not set")
 
-    tools = load_tools()
-    skills = load_skills()
-    client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
-    messages = [
-        {
-            "role": "system",
-            "content": f"You have access to the following skills:\n\n{'\n'.join(map(str, skills))}"},
-        {
-            "role": "user",
-            "content": args.prompt
-        }
-    ]
+    if args.prompt.startswith("/"):
+        skill_desc = invoke_skill(args.prompt[1:])
+        messages.append(
+            {
+                "role": "user",
+                "content": skill_desc
+            }
+        )
+    else:
+        messages.append(
+            {
+                "role": "user",
+                "content": args.prompt
+            }
+        )
 
     response = None
     try:
@@ -166,7 +185,7 @@ def main():
 
             # execute tools
             for item in function_calls:
-                tool = TOOLS_MAP.get(item.name)
+                tool = available_tools.get(item.name)
 
                 if not tool:
                     raise RuntimeError(
